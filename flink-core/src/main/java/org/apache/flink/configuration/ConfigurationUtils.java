@@ -18,14 +18,19 @@
 
 package org.apache.flink.configuration;
 
+import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.time.Time;
+import org.apache.flink.util.Preconditions;
 
 import javax.annotation.Nonnull;
 
 import java.io.File;
+import java.util.Arrays;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import static org.apache.flink.configuration.MetricOptions.SYSTEM_RESOURCE_METRICS;
 import static org.apache.flink.configuration.MetricOptions.SYSTEM_RESOURCE_METRICS_PROBING_INTERVAL;
@@ -36,6 +41,11 @@ import static org.apache.flink.configuration.MetricOptions.SYSTEM_RESOURCE_METRI
 public class ConfigurationUtils {
 
 	private static final String[] EMPTY = new String[0];
+
+	@VisibleForTesting
+	static final String[] PATH_SEPARATORS = {",", File.pathSeparator};
+
+	private static final Pattern PATH_SEPARATORS_PATTERN = compilePathSeparatorsAsPattern(PATH_SEPARATORS);
 
 	/**
 	 * Get job manager's heap memory. This method will check the new key
@@ -132,9 +142,27 @@ public class ConfigurationUtils {
 		return configuration;
 	}
 
+	private static Pattern compilePathSeparatorsAsPattern(String... separators) {
+		String regex = Arrays.stream(separators).map(Pattern::quote).collect(Collectors.joining("|"));
+		return Pattern.compile(regex);
+	}
+
+	private static String[] splitPaths(Pattern pattern, @Nonnull String separatedPaths) {
+		return separatedPaths.isEmpty() ? EMPTY : pattern.split(separatedPaths);
+	}
+
 	@Nonnull
-	private static String[] splitPaths(@Nonnull String separatedPaths) {
-		return separatedPaths.length() > 0 ? separatedPaths.split(",|" + File.pathSeparator) : EMPTY;
+	@VisibleForTesting
+	static String[] splitPaths(@Nonnull String separatedPaths, @Nonnull String... pathSeparators) {
+		Preconditions.checkArgument(pathSeparators.length != 0, "Empty path separators");
+		Pattern pattern = compilePathSeparatorsAsPattern(pathSeparators);
+		return splitPaths(pattern, separatedPaths);
+	}
+
+	@Nonnull
+	@VisibleForTesting
+	static String[] splitPaths(@Nonnull String separatedPaths) {
+		return splitPaths(PATH_SEPARATORS_PATTERN, separatedPaths);
 	}
 
 	// Make sure that we cannot instantiate this class

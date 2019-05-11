@@ -219,7 +219,7 @@ public final class ConfigConstants {
 
 	/**
 	 * The config parameter defining the directories for temporary files, separated by
-	 * ",", "|", or the system's {@link java.io.File#pathSeparator}.
+	 * "," or the system's {@link java.io.File#pathSeparator}.
 	 *
 	 * @deprecated Use {@link CoreOptions#TMP_DIRS} instead
 	 */
