@@ -32,6 +32,7 @@ import java.util.Map;
 import java.util.concurrent.BlockingDeque;
 import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 
 /**
  * The internal fetcher runnable responsible for polling message from the external system.
@@ -46,6 +47,7 @@ public class SplitFetcher<E, SplitT extends SourceSplit> implements Runnable {
 	private final Map<String, SplitT> assignedSplits;
 	private final FutureCompletingBlockingQueue<RecordsWithSplitIds<E>> elementsQueue;
 	private final SplitReader<E, SplitT> splitReader;
+	private final Consumer<Throwable> errorHandler;
 	private final Runnable shutdownHook;
 	private final AtomicBoolean wakeUp;
 	private final AtomicBoolean closed;
@@ -61,6 +63,7 @@ public class SplitFetcher<E, SplitT extends SourceSplit> implements Runnable {
 			int id,
 			FutureCompletingBlockingQueue<RecordsWithSplitIds<E>> elementsQueue,
 			SplitReader<E, SplitT> splitReader,
+			Consumer<Throwable> errorHandler,
 			Runnable shutdownHook) {
 
 		this.id = id;
@@ -68,6 +71,7 @@ public class SplitFetcher<E, SplitT extends SourceSplit> implements Runnable {
 		this.elementsQueue = elementsQueue;
 		this.assignedSplits = new HashMap<>();
 		this.splitReader = splitReader;
+		this.errorHandler = errorHandler;
 		this.shutdownHook = shutdownHook;
 		this.isIdle = true;
 		this.wakeUp = new AtomicBoolean(false);
@@ -90,7 +94,14 @@ public class SplitFetcher<E, SplitT extends SourceSplit> implements Runnable {
 			while (!closed.get()) {
 				runOnce();
 			}
+		} catch (Throwable t) {
+			errorHandler.accept(t);
 		} finally {
+			// This operation invokes after errorHandler.accept(t). If both operations are concurrent-safe,
+			// then we get happens-before relationship between errorHandler.accept(t) and shutdownHook.run().
+			// This way, if someone observes side effect of shutdownHook.run(), then it is safe to
+			// checking side effect of errorHandler.accept(t) to know whether errorHandler.accept(t)
+			// happened.
 			shutdownHook.run();
 			LOG.info("Split fetcher {} exited.", id);
 		}
