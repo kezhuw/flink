@@ -44,12 +44,12 @@ public class CoordinatedSourceITCase extends AbstractTestBase {
 	@Test
 	public void testEnumeratorReaderCommunication() throws Exception {
 		StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-		MockBaseSource source = new MockBaseSource(2, 10, Boundedness.BOUNDED);
+		MockBaseSource source = new MockBaseSource(10, 10, Boundedness.BOUNDED);
 		DataStream<Integer> stream = env.fromSource(
 				source,
 				WatermarkStrategy.noWatermarks(),
 				"TestingSource");
-		executeAndVerify(env, stream, 20);
+		executeAndVerify(env, stream, 100);
 	}
 
 	@Test

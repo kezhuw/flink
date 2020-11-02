@@ -25,8 +25,10 @@ import org.apache.flink.connector.base.source.reader.splitreader.SplitReader;
 import org.apache.flink.connector.base.source.reader.splitreader.SplitsAddition;
 import org.apache.flink.connector.base.source.reader.splitreader.SplitsChange;
 
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * A mock split reader for unit tests. The mock split reader provides configurable behaviours.
@@ -41,6 +43,7 @@ public class MockSplitReader implements SplitReader<int[], MockSourceSplit> {
 	private final Map<String, MockSourceSplit> splits = new LinkedHashMap<>();
 	private final int numRecordsPerSplitPerFetch;
 	private final boolean blockingFetch;
+	private final Set<String> finishedSplits = new HashSet<>();
 
 	private final Object wakeupLock = new Object();
 	private volatile Thread threadInBlocking;
@@ -92,15 +95,19 @@ public class MockSplitReader implements SplitReader<int[], MockSourceSplit> {
 		try {
 			for (Map.Entry<String, MockSourceSplit> entry : splits.entrySet()) {
 				MockSourceSplit split = entry.getValue();
+				boolean hasRecords = false;
 				for (int i = 0; i < numRecordsPerSplitPerFetch && !split.isFinished(); i++) {
 					// This call may throw InterruptedException.
 					int[] record = split.getNext(blockingFetch);
 					if (record != null) {
 						records.add(entry.getKey(), record);
+						hasRecords = true;
 					}
 				}
-				if (split.isFinished()) {
+				if (!hasRecords && split.isFinished() && !finishedSplits.contains(split.splitId())) {
 					records.addFinishedSplit(entry.getKey());
+					finishedSplits.add(split.splitId());
+					break;
 				}
 			}
 		} catch (InterruptedException ie) {
