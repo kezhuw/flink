@@ -106,7 +106,7 @@ public class JdbcTestFixture {
 
 	public static final RowType ROW_TYPE = (RowType) fromLegacyInfoToDataType(ROW_TYPE_INFO).getLogicalType();
 
-	private static String getCreateQuery(String tableName) {
+	public static String getCreateQuery(String tableName) {
 		return "CREATE TABLE " + tableName + " (" +
 				"id INT NOT NULL DEFAULT 0," +
 				"title VARCHAR(50) DEFAULT NULL," +
