@@ -24,6 +24,7 @@ import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.api.common.time.Deadline;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.client.program.MiniClusterClient;
+import org.apache.flink.core.testutils.CheckedThread;
 import org.apache.flink.core.testutils.OneShotLatch;
 import org.apache.flink.runtime.checkpoint.CheckpointException;
 import org.apache.flink.runtime.checkpoint.CheckpointFailureReason;
@@ -43,6 +44,7 @@ import org.apache.flink.streaming.runtime.tasks.mailbox.MailboxDefaultAction;
 import org.apache.flink.test.util.AbstractTestBase;
 import org.apache.flink.util.ExceptionUtils;
 
+import org.hamcrest.Matchers;
 import org.junit.Assume;
 import org.junit.Rule;
 import org.junit.Test;
@@ -69,6 +71,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.either;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -226,12 +229,16 @@ public class JobMasterStopWithSavepointIT extends AbstractTestBase {
             if (!checkpointExceptionOptional.isPresent()) {
                 throw e;
             }
-            String exceptionMessage = checkpointExceptionOptional.get().getMessage();
-            assertTrue(
-                    "Stop with savepoint failed because of another cause " + exceptionMessage,
-                    exceptionMessage.contains("Failed to trigger savepoint")
-                            && exceptionMessage.contains(
-                                    CheckpointFailureReason.EXCEPTION.message()));
+            CheckpointException checkpointException = checkpointExceptionOptional.get();
+            assertSame(
+                    checkpointException.getCheckpointFailureReason(),
+                    CheckpointFailureReason.TRIGGER_CHECKPOINT_FAILURE);
+
+            Throwable cause = checkpointExceptionOptional.get().getCause();
+            assertThat(cause, Matchers.instanceOf(IOException.class));
+            assertThat(
+                    cause.getMessage(),
+                    Matchers.containsString("Failed to create savepoint directory at"));
         }
 
         final JobStatus jobStatus =
@@ -327,6 +334,19 @@ public class JobMasterStopWithSavepointIT extends AbstractTestBase {
         throw new AssertionError("Job did not become running within timeout.");
     }
 
+    /** A {@link StreamTask} that count down invoke latch. */
+    private static class InvokeCountingStreamTask extends NoOpStreamTask {
+        public InvokeCountingStreamTask(final Environment environment) throws Exception {
+            super(environment);
+        }
+
+        @Override
+        protected void processInput(MailboxDefaultAction.Controller controller) throws Exception {
+            invokeLatch.countDown();
+            controller.suspendDefaultAction();
+        }
+    }
+
     /**
      * A {@link StreamTask} which throws an exception in the {@code notifyCheckpointComplete()} for
      * subtask 0.
@@ -366,13 +386,12 @@ public class JobMasterStopWithSavepointIT extends AbstractTestBase {
         }
 
         @Override
-        public Future<Void> notifyCheckpointCompleteAsync(long checkpointId) {
+        public void finishTask() throws Exception {
             final long taskIndex = getEnvironment().getTaskInfo().getIndexOfThisSubtask();
-            if (checkpointId == synchronousSavepointId && taskIndex == 0) {
+            if (taskIndex == 0) {
                 throw new RuntimeException("Expected Exception");
             }
-
-            return super.notifyCheckpointCompleteAsync(checkpointId);
+            super.finishTask();
         }
 
         @Override
@@ -382,53 +401,49 @@ public class JobMasterStopWithSavepointIT extends AbstractTestBase {
     }
 
     /** A {@link StreamTask} that simply waits to be terminated normally. */
-    public static class NoOpBlockingStreamTask extends NoOpStreamTask {
+    public static class NoOpBlockingStreamTask extends InvokeCountingStreamTask {
 
         private final transient OneShotLatch finishLatch;
+        private final transient CheckedThread blockingThread;
 
         public NoOpBlockingStreamTask(final Environment environment) throws Exception {
             super(environment);
             this.finishLatch = new OneShotLatch();
+            this.blockingThread =
+                    new CheckedThread(
+                            "Blocking thread for "
+                                    + environment.getTaskInfo().getTaskNameWithSubtasks()) {
+                        @Override
+                        public void go() throws Exception {
+                            finishLatch.await();
+                        }
+                    };
+            this.blockingThread.setDaemon(true);
         }
 
         @Override
         protected void processInput(MailboxDefaultAction.Controller controller) throws Exception {
-            invokeLatch.countDown();
-            finishLatch.await();
-            controller.allActionsCompleted();
+            super.processInput(controller);
+            blockingThread.start();
         }
 
         @Override
         public void finishTask() throws Exception {
             finishingLatch.await();
             finishLatch.trigger();
+            blockingThread.sync();
+            mailboxProcessor.allActionsCompleted();
         }
     }
 
     /**
-     * A {@link StreamTask} that simply calls {@link CountDownLatch#countDown()} when invoking
-     * {@link #triggerCheckpointAsync}.
+     * A {@link StreamTask} that calls {@link CountDownLatch#countDown()} when invoking {@link
+     * #triggerCheckpointAsync}.
      */
-    public static class CheckpointCountingTask extends NoOpStreamTask {
-
-        private final transient OneShotLatch finishLatch;
+    public static class CheckpointCountingTask extends InvokeCountingStreamTask {
 
         public CheckpointCountingTask(final Environment environment) throws Exception {
             super(environment);
-            this.finishLatch = new OneShotLatch();
-        }
-
-        @Override
-        protected void processInput(MailboxDefaultAction.Controller controller) throws Exception {
-            invokeLatch.countDown();
-            finishLatch.await();
-            controller.allActionsCompleted();
-        }
-
-        @Override
-        protected void cancelTask() throws Exception {
-            super.cancelTask();
-            finishLatch.trigger();
         }
 
         @Override
@@ -441,7 +456,8 @@ public class JobMasterStopWithSavepointIT extends AbstractTestBase {
                 checkpointsToWaitFor.countDown();
             }
 
-            return CompletableFuture.completedFuture(true);
+            return super.triggerCheckpointAsync(
+                    checkpointMetaData, checkpointOptions, advanceToEndOfEventTime);
         }
     }
 }

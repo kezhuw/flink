@@ -2047,7 +2047,10 @@ public class CheckpointCoordinator {
         final Optional<CheckpointException> checkpointExceptionOptional =
                 findThrowable(throwable, CheckpointException.class);
         return checkpointExceptionOptional.orElseGet(
-                () -> new CheckpointException(defaultReason, throwable));
+                () -> {
+                    Throwable cause = ExceptionUtils.stripCompletionException(throwable);
+                    return new CheckpointException(defaultReason, cause);
+                });
     }
 
     private static class CheckpointIdAndStorageLocation {
