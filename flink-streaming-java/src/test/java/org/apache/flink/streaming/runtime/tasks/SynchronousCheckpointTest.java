@@ -145,7 +145,7 @@ public class SynchronousCheckpointTest {
     private static class StreamTaskUnderTest extends NoOpStreamTask {
 
         private Queue<Event> eventQueue;
-        private volatile boolean stopped;
+        private volatile boolean finished;
 
         StreamTaskUnderTest(final Environment env, Queue<Event> eventQueue) throws Exception {
             super(env);
@@ -159,13 +159,13 @@ public class SynchronousCheckpointTest {
 
         @Override
         protected void processInput(MailboxDefaultAction.Controller controller) throws Exception {
-            if (stopped || isCanceled()) {
+            if (finished || isCanceled()) {
                 controller.allActionsCompleted();
             }
         }
 
-        void stopTask() {
-            stopped = true;
+        protected void finishTask() {
+            finished = true;
         }
     }
 }

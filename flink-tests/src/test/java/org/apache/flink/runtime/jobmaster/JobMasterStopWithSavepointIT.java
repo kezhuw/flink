@@ -334,7 +334,7 @@ public class JobMasterStopWithSavepointIT extends AbstractTestBase {
         throw new AssertionError("Job did not become running within timeout.");
     }
 
-    /** A {@link StreamTask} that count down invoke latch. */
+    /** A {@link StreamTask} that count down invoke latch and suspend default action. */
     private static class InvokeCountingStreamTask extends NoOpStreamTask {
         public InvokeCountingStreamTask(final Environment environment) throws Exception {
             super(environment);
@@ -347,10 +347,7 @@ public class JobMasterStopWithSavepointIT extends AbstractTestBase {
         }
     }
 
-    /**
-     * A {@link StreamTask} which throws an exception in the {@code notifyCheckpointComplete()} for
-     * subtask 0.
-     */
+    /** A {@link StreamTask} which throws an exception in the {@code notifyCheckpointComplete()}. */
     public static class ExceptionOnCallbackStreamTask extends CheckpointCountingTask {
 
         private long synchronousSavepointId = Long.MIN_VALUE;
@@ -386,12 +383,8 @@ public class JobMasterStopWithSavepointIT extends AbstractTestBase {
         }
 
         @Override
-        public void finishTask() throws Exception {
-            final long taskIndex = getEnvironment().getTaskInfo().getIndexOfThisSubtask();
-            if (taskIndex == 0) {
-                throw new RuntimeException("Expected Exception");
-            }
-            super.finishTask();
+        public void cancelTask() throws Exception {
+            throw new RuntimeException("Expected Exception");
         }
 
         @Override
@@ -428,7 +421,8 @@ public class JobMasterStopWithSavepointIT extends AbstractTestBase {
         }
 
         @Override
-        public void finishTask() throws Exception {
+        public void cancelTask() throws Exception {
+            super.cancelTask();
             finishingLatch.await();
             finishLatch.trigger();
             blockingThread.sync();

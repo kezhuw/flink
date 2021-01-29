@@ -42,6 +42,7 @@ import org.apache.flink.runtime.deployment.ResultPartitionDeploymentDescriptor;
 import org.apache.flink.runtime.execution.CancelTaskException;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.execution.ExecutionState;
+import org.apache.flink.runtime.execution.StopTaskException;
 import org.apache.flink.runtime.execution.librarycache.LibraryCacheManager;
 import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
 import org.apache.flink.runtime.executiongraph.JobInformation;
@@ -753,6 +754,8 @@ public class Task
             // make sure the user code classloader is accessible thread-locally
             executingThread.setContextClassLoader(userCodeClassLoader.asClassLoader());
 
+            boolean stopped = false;
+
             // Monitor user codes from exiting JVM covering user function invocation. This can be
             // done in a finer-grained way like enclosing user callback functions individually,
             // but as exit triggered by framework is not performed and expected in this invoke
@@ -761,6 +764,8 @@ public class Task
             try {
                 // run the invokable
                 invokable.invoke();
+            } catch (StopTaskException exception) {
+                stopped = true;
             } finally {
                 FlinkSecurityManager.unmonitorUserSystemExitForCurrentThread();
             }
@@ -775,10 +780,12 @@ public class Task
             //  finalization of a successful execution
             // ----------------------------------------------------------------
 
-            // finish the produced partitions. if this fails, we consider the execution failed.
-            for (ResultPartitionWriter partitionWriter : consumableNotifyingPartitionWriters) {
-                if (partitionWriter != null) {
-                    partitionWriter.finish();
+            if (!stopped) {
+                // finish the produced partitions. if this fails, we consider the execution failed.
+                for (ResultPartitionWriter partitionWriter : consumableNotifyingPartitionWriters) {
+                    if (partitionWriter != null) {
+                        partitionWriter.finish();
+                    }
                 }
             }
 

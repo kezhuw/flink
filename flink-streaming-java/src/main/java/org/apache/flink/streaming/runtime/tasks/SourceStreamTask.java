@@ -18,6 +18,8 @@
 
 package org.apache.flink.streaming.runtime.tasks;
 
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Future;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.runtime.checkpoint.CheckpointMetaData;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
@@ -34,9 +36,6 @@ import org.apache.flink.streaming.runtime.tasks.mailbox.MailboxDefaultAction;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.Preconditions;
-
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Future;
 
 /**
  * {@link StreamTask} for executing a {@link StreamSource}.
@@ -170,7 +169,8 @@ public class SourceStreamTask<
                                             .isPresent()) {
                                 mailboxProcessor.reportThrowable(
                                         new CancelTaskException(sourceThreadThrowable));
-                            } else if (!isFinished && sourceThreadThrowable != null) {
+                            } else if (!(isFinished || isStopped())
+                                    && sourceThreadThrowable != null) {
                                 mailboxProcessor.reportThrowable(sourceThreadThrowable);
                             } else {
                                 mailboxProcessor.allActionsCompleted();
@@ -190,6 +190,7 @@ public class SourceStreamTask<
             } else if (!sourceThread.getCompletionFuture().isDone()) {
                 // source thread didn't start
                 sourceThread.getCompletionFuture().complete(null);
+                mailboxProcessor.allActionsCompleted();
             }
         }
     }

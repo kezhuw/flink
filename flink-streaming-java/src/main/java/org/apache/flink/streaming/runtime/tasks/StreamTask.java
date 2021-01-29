@@ -34,6 +34,7 @@ import org.apache.flink.runtime.checkpoint.channel.SequentialChannelStateReader;
 import org.apache.flink.runtime.concurrent.FutureUtils;
 import org.apache.flink.runtime.execution.CancelTaskException;
 import org.apache.flink.runtime.execution.Environment;
+import org.apache.flink.runtime.execution.StopWithSavepointException;
 import org.apache.flink.runtime.io.network.api.CancelCheckpointMarker;
 import org.apache.flink.runtime.io.network.api.writer.MultipleRecordWriters;
 import org.apache.flink.runtime.io.network.api.writer.NonRecordWriter;
@@ -98,7 +99,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -214,6 +214,8 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>> extends Ab
      * #invoke()}.
      */
     private volatile boolean failing;
+
+    private volatile long stopWithSavepointId;
 
     private boolean disposedOperators;
 
@@ -380,7 +382,15 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>> extends Ab
 
     protected abstract void init() throws Exception;
 
-    protected void cancelTask() throws Exception {}
+    protected void cancelTask() throws Exception {
+        getCompletionFuture()
+                .whenComplete(
+                        (unusedResult, unusedError) -> {
+                            // WARN: the method is called from the task thread but the callback
+                            // can be invoked from a different thread
+                            mailboxProcessor.allActionsCompleted();
+                        });
+    }
 
     protected void cleanup() throws Exception {
         if (inputProcessor != null) {
@@ -467,13 +477,22 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>> extends Ab
     /**
      * Instructs the task to go through its normal termination routine, i.e. exit the run-loop and
      * call {@link StreamOperator#close()} and {@link StreamOperator#dispose()} on its operators.
-     *
-     * <p>This is used by the source task to get out of the run-loop when the job is stopped with a
-     * savepoint.
-     *
-     * <p>For tasks other than the source task, this method does nothing.
      */
-    protected void finishTask() throws Exception {}
+    protected void finishTask() throws Exception {
+        cancelTask();
+    }
+
+    /** Stops task with a savepoint. Should only be called in mailbox thread. */
+    protected final void stopTask(long savepointId) throws Exception {
+        Preconditions.checkArgument(savepointId != 0);
+        cancelTask();
+        stopWithSavepointId = savepointId;
+    }
+
+    /** Stops task. Should only be called in mailbox thread. */
+    protected final void stopTask() throws Exception {
+        stopTask(-1);
+    }
 
     // ------------------------------------------------------------------------
     //  Core work methods of the Stream Task
@@ -572,6 +591,10 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>> extends Ab
             // let the task do its work
             runMailboxLoop();
 
+            if (stopWithSavepointId != 0) {
+                throw new StopWithSavepointException(stopWithSavepointId);
+            }
+
             // if this left the run() method cleanly despite the fact that this was canceled,
             // make sure the "clean shutdown" is not attempted
             if (canceled) {
@@ -580,7 +603,9 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>> extends Ab
 
             afterInvoke();
         } catch (Throwable invokeException) {
-            failing = !canceled;
+            failing =
+                    !(invokeException instanceof CancelTaskException
+                            || invokeException instanceof StopWithSavepointException);
             try {
                 cleanUpInvoke();
             }
@@ -704,24 +729,10 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>> extends Ab
         canceled = true;
 
         FlinkSecurityManager.monitorUserSystemExitForCurrentThread();
-        // the "cancel task" call must come first, but the cancelables must be
-        // closed no matter what
         try {
             cancelTask();
         } finally {
             FlinkSecurityManager.unmonitorUserSystemExitForCurrentThread();
-            getCompletionFuture()
-                    .whenComplete(
-                            (unusedResult, unusedError) -> {
-                                // WARN: the method is called from the task thread but the callback
-                                // can be invoked from a different thread
-                                mailboxProcessor.allActionsCompleted();
-                                try {
-                                    cancelables.close();
-                                } catch (IOException e) {
-                                    throw new CompletionException(e);
-                                }
-                            });
         }
     }
 
@@ -735,6 +746,10 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>> extends Ab
 
     public final boolean isCanceled() {
         return canceled;
+    }
+
+    public final boolean isStopped() {
+        return stopWithSavepointId != 0;
     }
 
     public final boolean isFailing() {
@@ -1088,7 +1103,7 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>> extends Ab
         subtaskCheckpointCoordinator.notifyCheckpointComplete(
                 checkpointId, operatorChain, this::isRunning);
         if (isRunning && isSynchronousSavepointId(checkpointId)) {
-            finishTask();
+            stopTask(checkpointId);
             // Reset to "notify" the internal synchronous savepoint mailbox loop.
             resetSynchronousSavepointId();
         }
