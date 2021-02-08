@@ -39,6 +39,8 @@ import org.apache.flink.streaming.connectors.kafka.internals.KafkaTopicPartition
 import org.apache.flink.test.util.SuccessException;
 import org.apache.flink.util.Collector;
 
+import org.hamcrest.Matchers;
+import org.junit.Assert;
 import org.junit.BeforeClass;
 
 import java.util.Random;
@@ -132,6 +134,81 @@ public class KafkaShuffleTestBase extends KafkaConsumerTestBase {
                 numberOfPartitions,
                 kafkaServer.getStandardProperties(),
                 0);
+    }
+
+    static class ShuffledStreamBuilder {
+        private StreamExecutionEnvironment env;
+        private TimeCharacteristic timeCharacteristic;
+        private String topic;
+        private int numElementsPerProducer;
+        private int producerParallelism;
+        private int numberOfPartitions;
+        private boolean randomness;
+        private boolean boundedInput;
+
+        public static ShuffledStreamBuilder builder() {
+            return new ShuffledStreamBuilder();
+        }
+
+        public ShuffledStreamBuilder withEnv(StreamExecutionEnvironment env) {
+            this.env = env;
+            return this;
+        }
+
+        public ShuffledStreamBuilder withTimeCharacteristic(TimeCharacteristic timeCharacteristic) {
+            this.timeCharacteristic = timeCharacteristic;
+            return this;
+        }
+
+        public ShuffledStreamBuilder withTopic(String topic, int numberOfPartitions) {
+            this.topic = topic;
+            this.numberOfPartitions = numberOfPartitions;
+            return this;
+        }
+
+        public ShuffledStreamBuilder withProducer(
+                int producerParallelism, int numElementsPerProducer) {
+            this.producerParallelism = producerParallelism;
+            this.numElementsPerProducer = numElementsPerProducer;
+            return this;
+        }
+
+        public ShuffledStreamBuilder withRandomness(boolean randomness) {
+            this.randomness = randomness;
+            return this;
+        }
+
+        public ShuffledStreamBuilder withBoundedInput(boolean boundedInput) {
+            this.boundedInput = boundedInput;
+            return this;
+        }
+
+        public KeyedStream<Tuple3<Integer, Long, Integer>, Tuple> build() {
+            Assert.assertNotNull(env);
+            Assert.assertNotNull(timeCharacteristic);
+            Assert.assertNotNull(topic);
+            Assert.assertThat(producerParallelism, Matchers.greaterThan(0));
+            Assert.assertThat(numElementsPerProducer, Matchers.greaterThan(0));
+            Assert.assertThat(numberOfPartitions, Matchers.greaterThan(0));
+
+            DataStream<Tuple3<Integer, Long, Integer>> source =
+                    env.addSource(new KafkaSourceFunction(numElementsPerProducer, !boundedInput))
+                            .setParallelism(producerParallelism);
+            DataStream<Tuple3<Integer, Long, Integer>> input =
+                    (timeCharacteristic == EventTime)
+                            ? source.assignTimestampsAndWatermarks(
+                                            new PunctuatedExtractor(randomness))
+                                    .setParallelism(producerParallelism)
+                            : source;
+
+            return FlinkKafkaShuffle.persistentKeyBy(
+                    input,
+                    topic,
+                    producerParallelism,
+                    numberOfPartitions,
+                    kafkaServer.getStandardProperties(),
+                    0);
+        }
     }
 
     static class PunctuatedExtractor

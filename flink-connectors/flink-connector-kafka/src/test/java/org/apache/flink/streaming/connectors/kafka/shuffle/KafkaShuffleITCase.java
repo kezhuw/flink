@@ -27,6 +27,7 @@ import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.KeyedStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.sink.DiscardingSink;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.connectors.kafka.internals.KafkaShuffleFetcher.KafkaShuffleElement;
 import org.apache.flink.streaming.connectors.kafka.internals.KafkaShuffleFetcher.KafkaShuffleElementDeserializer;
@@ -274,6 +275,34 @@ public class KafkaShuffleITCase extends KafkaShuffleTestBase {
                         new ElementCountNoLessThanValidator(
                                 numElementsPerProducer * producerParallelism))
                 .setParallelism(1);
+
+        tryExecute(env, topic);
+
+        deleteTestTopic(topic);
+    }
+
+    @Test
+    public void testStoppedAfterInputExhausted() throws Exception {
+        TimeCharacteristic timeCharacteristic = EventTime;
+        String topic = topic("test_stopped_after_input_exhausted", timeCharacteristic);
+        final int numberOfPartitions = 3;
+        final int producerParallelism = 2;
+        final int numElementsPerProducer = 500;
+
+        createTestTopic(topic, numberOfPartitions, 1);
+
+        final StreamExecutionEnvironment env =
+                createEnvironment(producerParallelism, timeCharacteristic);
+
+        KeyedStream<Tuple3<Integer, Long, Integer>, Tuple> keyedStream =
+                ShuffledStreamBuilder.builder()
+                        .withEnv(env)
+                        .withTopic(topic, numberOfPartitions)
+                        .withProducer(producerParallelism, numElementsPerProducer)
+                        .withBoundedInput(true)
+                        .withTimeCharacteristic(timeCharacteristic)
+                        .build();
+        keyedStream.addSink(new DiscardingSink<>()).setParallelism(numberOfPartitions);
 
         tryExecute(env, topic);
 
