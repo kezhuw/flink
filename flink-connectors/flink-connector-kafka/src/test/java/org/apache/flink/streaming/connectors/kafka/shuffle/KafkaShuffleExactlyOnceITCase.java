@@ -18,9 +18,13 @@
 package org.apache.flink.streaming.connectors.kafka.shuffle;
 
 import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
+import org.apache.flink.api.common.state.ReducingState;
+import org.apache.flink.api.common.state.ReducingStateDescriptor;
 import org.apache.flink.api.java.tuple.Tuple;
 import org.apache.flink.api.java.tuple.Tuple3;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.datastream.KeyedStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -136,6 +140,62 @@ public class KafkaShuffleExactlyOnceITCase extends KafkaShuffleTestBase {
                 .setParallelism(1);
 
         FailingIdentityMapper.failedBefore = false;
+
+        tryExecute(env, topic);
+
+        deleteTestTopic(topic);
+    }
+
+    @Test
+    public void testKeyedStateAfterShuffle() throws Exception {
+        TimeCharacteristic timeCharacteristic = EventTime;
+        String topic = topic("keyed_state", timeCharacteristic);
+        final int numberOfPartitions = 3;
+        final int producerParallelism = 2;
+        final int numElementsPerProducer = 5;
+
+        createTestTopic(topic, numberOfPartitions, 1);
+
+        final StreamExecutionEnvironment env =
+                createEnvironment(producerParallelism, timeCharacteristic);
+
+        KeyedStream<Tuple3<Integer, Long, Integer>, Tuple> keyedStream =
+                createKafkaShuffle(
+                        env,
+                        topic,
+                        numElementsPerProducer,
+                        producerParallelism,
+                        EventTime,
+                        numberOfPartitions);
+        keyedStream
+                .map(
+                        new RichMapFunction<
+                                Tuple3<Integer, Long, Integer>, Tuple3<Integer, Long, Integer>>() {
+                            private final ReducingStateDescriptor<Long> stateDescriptor =
+                                    new ReducingStateDescriptor<>(
+                                            "elements-count", Long::sum, Long.class);
+
+                            private ReducingState<Long> elementsCount;
+
+                            @Override
+                            public void open(Configuration parameters) throws Exception {
+                                super.open(parameters);
+                                elementsCount =
+                                        getRuntimeContext().getReducingState(stateDescriptor);
+                            }
+
+                            @Override
+                            public Tuple3<Integer, Long, Integer> map(
+                                    Tuple3<Integer, Long, Integer> value) throws Exception {
+                                elementsCount.add(1L);
+                                return value;
+                            }
+                        })
+                .setParallelism(numberOfPartitions)
+                .map(new ToInteger(producerParallelism))
+                .addSink(
+                        new ValidatingExactlyOnceSink(numElementsPerProducer * producerParallelism))
+                .setParallelism(1);
 
         tryExecute(env, topic);
 
