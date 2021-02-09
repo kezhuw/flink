@@ -49,22 +49,33 @@ import org.apache.flink.runtime.testtasks.BlockingNoOpInvokable;
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.streaming.api.checkpoint.ListCheckpointed;
 import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.datastream.IterativeStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.DiscardingSink;
 import org.apache.flink.streaming.api.functions.source.RichSourceFunction;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
 import org.apache.flink.streaming.api.graph.StreamGraph;
+import org.apache.flink.streaming.api.operators.AbstractInput;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
+import org.apache.flink.streaming.api.operators.AbstractStreamOperatorFactory;
+import org.apache.flink.streaming.api.operators.AbstractStreamOperatorV2;
 import org.apache.flink.streaming.api.operators.BoundedOneInput;
 import org.apache.flink.streaming.api.operators.ChainingStrategy;
+import org.apache.flink.streaming.api.operators.Input;
+import org.apache.flink.streaming.api.operators.MultipleInputStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
+import org.apache.flink.streaming.api.operators.StreamOperator;
+import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
+import org.apache.flink.streaming.api.operators.StreamOperatorParameters;
+import org.apache.flink.streaming.api.transformations.MultipleInputTransformation;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.test.util.MiniClusterWithClientResource;
 import org.apache.flink.test.util.TestUtils;
 import org.apache.flink.testutils.EntropyInjectingTestFileSystem;
 import org.apache.flink.util.Collector;
 import org.apache.flink.util.ExceptionUtils;
+import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.TestLogger;
 
 import org.hamcrest.Description;
@@ -99,6 +110,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static java.util.concurrent.CompletableFuture.allOf;
@@ -377,6 +389,36 @@ public class SavepointITCase extends TestLogger {
         }
     }
 
+    static class ProgressOperator<T> extends AbstractStreamOperator<T>
+            implements OneInputStreamOperator<T, T> {
+        static volatile CountDownLatch progressLatch;
+
+        private transient boolean processed;
+
+        public ProgressOperator(ChainingStrategy chainingStrategy) {
+            this.chainingStrategy = chainingStrategy;
+        }
+
+        @Override
+        public void processElement(StreamRecord<T> element) throws Exception {
+            output.collect(element);
+            if (!processed) {
+                processed = true;
+                progressLatch.countDown();
+            }
+        }
+
+        // --------------------------------------------------------------------
+
+        static CountDownLatch getProgressLatch() {
+            return progressLatch;
+        }
+
+        static void resetForTest(int parallelism) {
+            progressLatch = new CountDownLatch(parallelism);
+        }
+    }
+
     static class BoundedPassThroughOperator<T> extends AbstractStreamOperator<T>
             implements OneInputStreamOperator<T, T>, BoundedOneInput {
         static volatile CountDownLatch progressLatch;
@@ -545,6 +587,184 @@ public class SavepointITCase extends TestLogger {
             } finally {
                 cluster.after();
             }
+        }
+    }
+
+    @Test
+    public void testStopSavepointWithFlip27Source() throws Exception {
+        final int numTaskManagers = 2;
+        final int numSlotsPerTaskManager = 2;
+        for (ChainingStrategy chainingStrategy : ChainingStrategy.values()) {
+            if (chainingStrategy == ChainingStrategy.HEAD_WITH_SOURCES) {
+                // This only works with multi-inputs.
+                continue;
+            }
+            final MiniClusterResourceFactory clusterFactory =
+                    new MiniClusterResourceFactory(
+                            numTaskManagers,
+                            numSlotsPerTaskManager,
+                            getFileBasedCheckpointsConfig());
+
+            int parallelism = 2;
+            StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+            env.setParallelism(parallelism);
+
+            ProgressOperator<Long> operator = new ProgressOperator<>(chainingStrategy);
+            DataStream<Long> stream =
+                    env.fromSequence(0, Long.MAX_VALUE)
+                            .transform("pass-through", BasicTypeInfo.LONG_TYPE_INFO, operator);
+            stream.addSink(new DiscardingSink<>());
+
+            final JobGraph jobGraph = env.getStreamGraph().getJobGraph();
+            final JobID jobId = jobGraph.getJobID();
+
+            MiniClusterWithClientResource cluster = clusterFactory.get();
+            cluster.before();
+            ClusterClient<?> client = cluster.getClusterClient();
+
+            try {
+                ProgressOperator.resetForTest(parallelism);
+
+                client.submitJob(jobGraph).get();
+
+                ProgressOperator.getProgressLatch().await();
+
+                client.stopWithSavepoint(jobId, false, null).get();
+            } finally {
+                cluster.after();
+            }
+        }
+    }
+
+    private static class MultipleInputProgressOperator<T> extends AbstractStreamOperatorV2<T>
+            implements MultipleInputStreamOperator<T> {
+        private static CountDownLatch progressLatch;
+
+        private final int numberOfInputs;
+        private int numberOfInputsProcessed;
+
+        public MultipleInputProgressOperator(
+                StreamOperatorParameters<T> parameters, int numberOfInputs) {
+            super(parameters, numberOfInputs);
+            this.numberOfInputs = numberOfInputs;
+            Preconditions.checkArgument(numberOfInputs > 0, "number of inputs must greater than 0");
+        }
+
+        private class ProgressInput extends AbstractInput<T, T> {
+            private boolean processed = false;
+
+            public ProgressInput(AbstractStreamOperatorV2<T> owner, int inputId) {
+                super(owner, inputId);
+            }
+
+            @Override
+            public void processElement(StreamRecord<T> element) throws Exception {
+                if (!processed) {
+                    processed = true;
+                    numberOfInputsProcessed++;
+                    if (numberOfInputsProcessed == numberOfInputs) {
+                        progressLatch.countDown();
+                    }
+                }
+                output.collect(element);
+            }
+        }
+
+        @Override
+        public List<Input> getInputs() {
+            return IntStream.range(1, numberOfInputs + 1)
+                    .mapToObj(inputId -> new ProgressInput(this, inputId))
+                    .collect(Collectors.toList());
+        }
+
+        // --------------------------------------------------------------------
+
+        private static class OperatorFactory<T> extends AbstractStreamOperatorFactory<T> {
+            private final int numberOfInputs;
+
+            public OperatorFactory(ChainingStrategy chainingStrategy, int numberOfInputs) {
+                this.numberOfInputs = numberOfInputs;
+                setChainingStrategy(chainingStrategy);
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <O extends StreamOperator<T>> O createStreamOperator(
+                    StreamOperatorParameters<T> parameters) {
+                return (O) new MultipleInputProgressOperator<>(parameters, numberOfInputs);
+            }
+
+            @Override
+            public Class<? extends StreamOperator> getStreamOperatorClass(ClassLoader classLoader) {
+                return MultipleInputProgressOperator.class;
+            }
+        }
+
+        static <T> StreamOperatorFactory<T> factoryOf(
+                ChainingStrategy chainingStrategy, int numberOfInputs) {
+            return new OperatorFactory<>(chainingStrategy, numberOfInputs);
+        }
+
+        static CountDownLatch getProgressLatch() {
+            return progressLatch;
+        }
+
+        static void resetForTest(int parallelism) {
+            progressLatch = new CountDownLatch(parallelism);
+        }
+    }
+
+    @Test
+    public void testStopSavepointWithFlip27SourceChainedOut() throws Exception {
+        final int numTaskManagers = 2;
+        final int numSlotsPerTaskManager = 5;
+        final MiniClusterResourceFactory clusterFactory =
+                new MiniClusterResourceFactory(
+                        numTaskManagers, numSlotsPerTaskManager, getFileBasedCheckpointsConfig());
+
+        int parallelism = 2;
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(parallelism);
+
+        // Currently chained sources are supported only with objectReuse enabled
+        env.getConfig().enableObjectReuse();
+
+        DataStreamSource<Long> source =
+                env.fromSequence(0, Long.MAX_VALUE).setParallelism(parallelism);
+
+        StreamOperatorFactory<Long> progressOperatorFactory =
+                MultipleInputProgressOperator.factoryOf(ChainingStrategy.HEAD_WITH_SOURCES, 1);
+        MultipleInputTransformation<Long> progressTransformation =
+                new MultipleInputTransformation<>(
+                        "progress",
+                        progressOperatorFactory,
+                        BasicTypeInfo.LONG_TYPE_INFO,
+                        parallelism);
+        progressTransformation.addInput(source.getTransformation());
+        env.addOperator(progressTransformation);
+
+        DataStream<Long> stream = new DataStream<>(env, progressTransformation);
+        stream.addSink(new DiscardingSink<>()).setParallelism(1).disableChaining();
+
+        final JobGraph jobGraph = env.getStreamGraph().getJobGraph();
+        final JobID jobId = jobGraph.getJobID();
+
+        assertEquals(jobGraph.getNumberOfVertices(), 2);
+
+        MiniClusterWithClientResource cluster = clusterFactory.get();
+        cluster.before();
+        ClusterClient<?> client = cluster.getClusterClient();
+
+        try {
+            MultipleInputProgressOperator.resetForTest(parallelism);
+
+            client.submitJob(jobGraph).get();
+
+            MultipleInputProgressOperator.getProgressLatch().await();
+
+            client.stopWithSavepoint(jobId, false, null).get();
+        } finally {
+            cluster.after();
         }
     }
 
