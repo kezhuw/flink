@@ -33,6 +33,7 @@ import org.apache.flink.runtime.taskexecutor.TaskManagerServices;
 import org.apache.flink.runtime.taskexecutor.TaskManagerServicesBuilder;
 import org.apache.flink.runtime.taskexecutor.slot.TestingTaskSlotTable;
 import org.apache.flink.runtime.taskmanager.Task;
+import org.apache.flink.util.IOUtils;
 import org.apache.flink.util.TestLogger;
 
 import org.apache.flink.shaded.guava18.com.google.common.collect.Sets;
@@ -43,9 +44,17 @@ import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import static org.apache.flink.runtime.metrics.util.MetricUtils.METRIC_GROUP_FLINK;
 import static org.apache.flink.runtime.metrics.util.MetricUtils.METRIC_GROUP_MANAGED_MEMORY;
@@ -58,6 +67,53 @@ import static org.junit.Assert.assertThat;
 public class MetricUtilsTest extends TestLogger {
 
     private static final Logger LOG = LoggerFactory.getLogger(MetricUtilsTest.class);
+
+    private static class InterceptingClassLoader extends ClassLoader {
+        private final Set<String> interceptingClassNames = new HashSet<>();
+        private final Map<String, Class<?>> interceptedClasses = new HashMap<>();
+
+        public InterceptingClassLoader(
+                Collection<String> interceptingClassNames, ClassLoader parent) {
+            super(parent);
+            this.interceptingClassNames.addAll(interceptingClassNames);
+        }
+
+        @Override
+        protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+            Class<?> interceptedClass = interceptedClasses.get(name);
+            if (interceptedClass != null) {
+                return interceptedClass;
+            }
+            if (!interceptingClassNames.contains(name)) {
+                return super.loadClass(name, resolve);
+            }
+            String classFileResourceName = name.replace('.', '/') + ".class";
+            try (InputStream inputStream = getResourceAsStream(classFileResourceName)) {
+                ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+                IOUtils.copyBytes(inputStream, outputStream);
+                byte[] bytecode = outputStream.toByteArray();
+                Class<?> definedClass =
+                        defineClass(
+                                name,
+                                bytecode,
+                                0,
+                                bytecode.length,
+                                MetricUtils.class.getProtectionDomain());
+                interceptedClasses.put(name, definedClass);
+                return definedClass;
+            } catch (Exception ex) {
+                throw new ClassNotFoundException(ex.getMessage(), ex);
+            }
+        }
+    }
+
+    private static Class<?> reloadClassWithInterceptingClassLoader(Class<?> clazz)
+            throws ClassNotFoundException {
+        InterceptingClassLoader classLoader =
+                new InterceptingClassLoader(
+                        Collections.singleton(clazz.getName()), clazz.getClassLoader());
+        return classLoader.loadClass(clazz.getName(), true);
+    }
 
     /**
      * Tests that the {@link MetricUtils#startRemoteMetricsRpcService(Configuration, String)}
@@ -161,7 +217,39 @@ public class MetricUtilsTest extends TestLogger {
     }
 
     @Test
-    public void testMetaspaceMetricUsageNotStatic() throws InterruptedException {
+    public void testNonHeapMetricUsageNotStatic() throws Exception {
+        final InterceptingOperatorMetricGroup nonHeapMetrics =
+                new InterceptingOperatorMetricGroup();
+
+        MetricUtils.instantiateNonHeapMemoryMetrics(nonHeapMetrics);
+
+        @SuppressWarnings("unchecked")
+        final Gauge<Long> used = (Gauge<Long>) nonHeapMetrics.get(MetricNames.MEMORY_USED);
+
+        final long usedNonHeapInitially = used.getValue();
+
+        // check memory usage difference multiple times since other tests may affect memory usage as
+        // well
+        for (int x = 0; x < 10; x++) {
+            Class<?> reloadedMetricUtilsClass =
+                    reloadClassWithInterceptingClassLoader(MetricUtils.class);
+            final long usedNonHeapAfterAllocation = used.getValue();
+
+            if (usedNonHeapInitially != usedNonHeapAfterAllocation) {
+                return;
+            }
+
+            // This assertion try to prevent local variable from gc in absent of
+            // Reference.reachabilityFence.
+            Assert.assertNotSame(MetricUtils.class, reloadedMetricUtilsClass);
+
+            Thread.sleep(50);
+        }
+        Assert.fail("Non-Heap usage metric never changed it's value.");
+    }
+
+    @Test
+    public void testMetaspaceMetricUsageNotStatic() throws Exception {
         final InterceptingOperatorMetricGroup metaspaceMetrics =
                 new InterceptingOperatorMetricGroup() {
                     @Override
@@ -180,16 +268,19 @@ public class MetricUtilsTest extends TestLogger {
         // check memory usage difference multiple times since other tests may affect memory usage as
         // well
         for (int x = 0; x < 10; x++) {
-            List<Runnable> consumerList = new ArrayList<>();
-            for (int i = 0; i < 10; i++) {
-                consumerList.add(() -> {});
-            }
+            Class<?> reloadedMetricUtilsClass =
+                    reloadClassWithInterceptingClassLoader(MetricUtils.class);
 
             final long usedMetaspaceAfterAllocation = used.getValue();
 
             if (usedMetaspaceInitially != usedMetaspaceAfterAllocation) {
                 return;
             }
+
+            // This assertion try to prevent local variable from gc in absent of
+            // Reference.reachabilityFence.
+            Assert.assertNotSame(MetricUtils.class, reloadedMetricUtilsClass);
+
             Thread.sleep(50);
         }
         Assert.fail("Metaspace usage metric never changed it's value.");
