@@ -22,6 +22,7 @@ import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.operators.ResourceSpec;
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.core.memory.ManagedMemoryUseCase;
@@ -36,6 +37,7 @@ import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.co.CoMapFunction;
 import org.apache.flink.streaming.api.functions.sink.DiscardingSink;
 import org.apache.flink.streaming.api.functions.sink.SinkFunction;
+import org.apache.flink.streaming.api.functions.source.FromElementsFunction;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.ChainingStrategy;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
@@ -65,6 +67,7 @@ import org.hamcrest.TypeSafeMatcher;
 import org.junit.Test;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -72,9 +75,11 @@ import java.util.List;
 import java.util.Map;
 
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 
@@ -202,6 +207,25 @@ public class StreamGraphGeneratorTest extends TestLogger {
         assertTrue(
                 graph.getStreamNode(shuffleOperator.getId()).getOutEdges().get(0).getPartitioner()
                         instanceof ShufflePartitioner);
+    }
+
+    @Test
+    public void testOutputTypeConfigurationWithUserDefinedFunction() throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        List<Integer> data = Arrays.asList(5, 6);
+        FromElementsFunction<Integer> source = new FromElementsFunction<>(data);
+
+        env.addSource(source, BasicTypeInfo.INT_TYPE_INFO).addSink(new DiscardingSink<>());
+
+        assertThat(source, instanceOf(OutputTypeConfigurable.class));
+        assertNull(source.getSerializer());
+
+        env.getStreamGraph();
+
+        TypeSerializer<Integer> typeSerializer = source.getSerializer();
+        assertNotNull(typeSerializer);
+        assertEquals(BasicTypeInfo.INT_TYPE_INFO.createSerializer(env.getConfig()), typeSerializer);
     }
 
     /**
