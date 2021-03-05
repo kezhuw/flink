@@ -1145,6 +1145,91 @@ public class SavepointITCase extends TestLogger {
         }
     }
 
+    @Test
+    public void testStopWithSavepointForJobWithIteration() throws Exception {
+
+        for (int i = 0; i < ITER_TEST_PARALLELISM; ++i) {
+            iterTestSnapshotWait[i] = new OneShotLatch();
+        }
+
+        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        final IntegerStreamSource source = new IntegerStreamSource();
+        IterativeStream<Integer> iteration =
+                env.addSource(source)
+                        .flatMap(
+                                new RichFlatMapFunction<Integer, Integer>() {
+
+                                    private static final long serialVersionUID = 1L;
+
+                                    @Override
+                                    public void flatMap(Integer in, Collector<Integer> clctr)
+                                            throws Exception {
+                                        clctr.collect(in);
+                                    }
+                                })
+                        .setParallelism(ITER_TEST_PARALLELISM)
+                        .keyBy(
+                                new KeySelector<Integer, Object>() {
+
+                                    private static final long serialVersionUID = 1L;
+
+                                    @Override
+                                    public Object getKey(Integer value) throws Exception {
+                                        return value;
+                                    }
+                                })
+                        .flatMap(new DuplicateFilter())
+                        .setParallelism(ITER_TEST_PARALLELISM)
+                        .iterate();
+
+        DataStream<Integer> iterationBody =
+                iteration
+                        .map(
+                                new MapFunction<Integer, Integer>() {
+                                    private static final long serialVersionUID = 1L;
+
+                                    @Override
+                                    public Integer map(Integer value) throws Exception {
+                                        return value;
+                                    }
+                                })
+                        .setParallelism(ITER_TEST_PARALLELISM);
+
+        iteration.closeWith(iterationBody);
+
+        StreamGraph streamGraph = env.getStreamGraph("Test");
+
+        JobGraph jobGraph = streamGraph.getJobGraph();
+
+        Configuration config = getFileBasedCheckpointsConfig();
+        config.addAll(jobGraph.getJobConfiguration());
+        config.set(TaskManagerOptions.MANAGED_MEMORY_SIZE, MemorySize.ZERO);
+
+        MiniClusterWithClientResource cluster =
+                new MiniClusterWithClientResource(
+                        new MiniClusterResourceConfiguration.Builder()
+                                .setConfiguration(config)
+                                .setNumberTaskManagers(1)
+                                .setNumberSlotsPerTaskManager(2 * jobGraph.getMaximumParallelism())
+                                .build());
+        cluster.before();
+        ClusterClient<?> client = cluster.getClusterClient();
+
+        String savepointPath = null;
+        try {
+            client.submitJob(jobGraph).get();
+            for (OneShotLatch latch : iterTestSnapshotWait) {
+                latch.await();
+            }
+            savepointPath = client.stopWithSavepoint(jobGraph.getJobID(), false, null).get();
+        } finally {
+            if (null != savepointPath) {
+                client.disposeSavepoint(savepointPath);
+            }
+            cluster.after();
+        }
+    }
+
     private static final class IntegerStreamSource extends RichSourceFunction<Integer>
             implements ListCheckpointed<Integer> {
 
