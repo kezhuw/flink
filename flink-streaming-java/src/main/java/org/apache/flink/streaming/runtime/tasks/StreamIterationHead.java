@@ -20,11 +20,13 @@ package org.apache.flink.streaming.runtime.tasks;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.runtime.execution.Environment;
+import org.apache.flink.streaming.api.operators.MailboxExecutor;
 import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.io.BlockingQueueBroker;
 import org.apache.flink.streaming.runtime.io.RecordWriterOutput;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.tasks.mailbox.MailboxDefaultAction;
+import org.apache.flink.streaming.runtime.tasks.mailbox.TaskMailbox;
 import org.apache.flink.util.FlinkRuntimeException;
 
 import org.slf4j.Logger;
@@ -50,6 +52,8 @@ public class StreamIterationHead<OUT> extends OneInputStreamTask<OUT, OUT> {
     private final long iterationWaitTime;
     private final boolean shouldWait;
 
+    private boolean dataChannelDraining;
+
     public StreamIterationHead(Environment env) throws Exception {
         super(env);
         final String iterationId = getConfiguration().getIterationId();
@@ -67,7 +71,31 @@ public class StreamIterationHead<OUT> extends OneInputStreamTask<OUT, OUT> {
         this.shouldWait = iterationWaitTime > 0;
     }
 
+    @Override
+    protected void finishTask() throws Exception {
+        mailboxProcessor.allActionsCompleted();
+    }
+
+    protected void runSynchronousSavepointMailboxLoop() throws Exception {
+        MailboxExecutor mailboxExecutor =
+                mailboxProcessor.getMailboxExecutor(TaskMailbox.MAX_PRIORITY);
+
+        while (!isCanceled() && getSynchronousSavepointId().isPresent()) {
+            if (!dataChannelDraining) {
+                mailboxExecutor.execute(
+                        this::drainDataChannel, "drain data channel to break feedback loop");
+                dataChannelDraining = true;
+            }
+            mailboxExecutor.yield();
+        }
+    }
+
     // ------------------------------------------------------------------------
+
+    private void drainDataChannel() throws Exception {
+        dataChannel.poll(20, TimeUnit.MILLISECONDS);
+        dataChannelDraining = false;
+    }
 
     @Override
     protected void processInput(MailboxDefaultAction.Controller controller) throws Exception {

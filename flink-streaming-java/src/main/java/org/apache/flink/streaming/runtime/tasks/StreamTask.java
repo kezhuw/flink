@@ -456,7 +456,7 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>> extends Ab
         return syncSavepointId != null && syncSavepointId == checkpointId;
     }
 
-    private void runSynchronousSavepointMailboxLoop() throws Exception {
+    protected void runSynchronousSavepointMailboxLoop() throws Exception {
         assert syncSavepointId != null;
 
         MailboxExecutor mailboxExecutor =
@@ -922,6 +922,8 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>> extends Ab
                     performCheckpoint(checkpointMetaData, checkpointOptions, checkpointMetrics);
             if (!success) {
                 declineCheckpoint(checkpointMetaData.getCheckpointId());
+            } else if (isSynchronousSavepointId(checkpointMetaData.getCheckpointId())) {
+                runSynchronousSavepointMailboxLoop();
             }
             return success;
         } catch (Exception e) {
