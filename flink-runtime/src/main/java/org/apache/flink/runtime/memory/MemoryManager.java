@@ -86,6 +86,8 @@ public class MemoryManager {
     /** Flag whether the close() has already been invoked. */
     private volatile boolean isShutDown;
 
+    private boolean innerReferencedCleanup = true;
+
     /**
      * Creates a memory manager with the given capacity and given page size.
      *
@@ -167,6 +169,14 @@ public class MemoryManager {
         return isShutDown;
     }
 
+    public UnsafeMemoryBudget getMemoryBudget() {
+        return memoryBudget;
+    }
+
+    public void setInnerReferencedCleanup(boolean innerReferencedCleanup) {
+        this.innerReferencedCleanup = innerReferencedCleanup;
+    }
+
     /**
      * Checks if the memory manager's memory is completely available (nothing allocated at the
      * moment).
@@ -235,7 +245,12 @@ public class MemoryManager {
                     String.format("Could not allocate %d pages", numberOfPages), e);
         }
 
-        Runnable pageCleanup = this::releasePage;
+        Runnable pageCleanup;
+        if (innerReferencedCleanup) {
+            pageCleanup = this::releasePage;
+        } else {
+            pageCleanup = memoryBudget.releaseMemoryLater(getPageSize());
+        }
         allocatedSegments.compute(
                 owner,
                 (o, currentSegmentsForOwner) -> {

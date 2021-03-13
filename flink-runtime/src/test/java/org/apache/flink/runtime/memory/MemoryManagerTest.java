@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.Random;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 /** Tests for the memory manager. */
@@ -205,6 +206,45 @@ public class MemoryManagerTest {
             }
         }
         return true;
+    }
+
+    private UnsafeMemoryBudget allocateLeakingPages(boolean innerReferencedCleanup)
+            throws MemoryAllocationException {
+        MemoryManager memoryManager =
+                MemoryManagerBuilder.newBuilder()
+                        .setMemorySize(MEMORY_SIZE)
+                        .setPageSize(PAGE_SIZE)
+                        .build();
+        memoryManager.setInnerReferencedCleanup(innerReferencedCleanup);
+        List<MemorySegment> segments =
+                memoryManager.allocatePages(
+                        new Object(), (int) memoryManager.getMemorySize() / PAGE_SIZE);
+
+        // This works for 1.12.2.
+        // segments.forEach(MemorySegment::free);
+
+        // This works for all affected versions.
+        // memoryManager.release(segments);
+        return memoryManager.getMemoryBudget();
+    }
+
+    private void assertSafetyNet(boolean innerReferencedCleanup) throws Exception {
+        UnsafeMemoryBudget memoryBudget = allocateLeakingPages(innerReferencedCleanup);
+        for (int i = 0; i < 50; i++) {
+            System.gc();
+            Thread.sleep(1);
+        }
+        assertTrue(memoryBudget.verifyEmpty());
+    }
+
+    @Test
+    public void testSafetyNetWithInnerReferencedCleanup() throws Exception {
+        assertSafetyNet(true);
+    }
+
+    @Test
+    public void testSafetyNetWithUnreferencedCleanup() throws Exception {
+        assertSafetyNet(false);
     }
 
     @Test

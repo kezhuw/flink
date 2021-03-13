@@ -213,4 +213,10 @@ class UnsafeMemoryBudget {
                             size, currentAvailableMemorySize, totalMemorySize));
         }
     }
+
+    Runnable releaseMemoryLater(@Nonnegative long size) {
+        return () -> {
+            releaseMemory(size);
+        };
+    }
 }
